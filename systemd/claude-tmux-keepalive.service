@@ -1,0 +1,11 @@
+[Unit]
+Description=claude-tmux Code - keep-alive patrol (triggered every minute by claude-tmux-keepalive.timer)
+After=network-online.target multi-user.target
+
+[Service]
+Type=oneshot
+# May (re)launch a tmux session that must outlive this oneshot run.
+KillMode=none
+ExecStart=/root/claude-tmux-manager/claude-tmux-keep_alive.sh
+StandardOutput=append:/root/claude-tmux-manager/state/keepalive.service.log
+StandardError=append:/root/claude-tmux-manager/state/keepalive.service.log

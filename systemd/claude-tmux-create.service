@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-tmux Code - create initial remote-control session (runs once at boot)
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The script starts a detached tmux server/session that must keep running after
+# this oneshot unit finishes - KillMode=none stops systemd from reaping it.
+KillMode=none
+ExecStart=/root/claude-tmux-manager/claude-tmux-create.sh
+StandardOutput=append:/root/claude-tmux-manager/state/create.service.log
+StandardError=append:/root/claude-tmux-manager/state/create.service.log
+
+[Install]
+WantedBy=multi-user.target

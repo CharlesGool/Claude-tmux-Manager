@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Runtime state generated on each deployment (session <-> conversation
+# mapping, logs) - not part of the distributable project.
+state/*
+!state/.gitkeep

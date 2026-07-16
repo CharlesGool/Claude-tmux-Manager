@@ -1,0 +1,11 @@
+[Unit]
+Description=Run claude-tmux Code keep-alive patrol every minute
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=claude-tmux-keepalive.service
+
+[Install]
+WantedBy=timers.target
