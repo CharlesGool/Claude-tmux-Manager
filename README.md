@@ -80,7 +80,7 @@ claude-tmux-manager/
 ## 安装
 
 ```bash
-git clone <this-repo-url> /root/claude-tmux-manager
+git clone https://github.com/CharlesGool/Claude-tmux-Manager /root/claude-tmux-manager
 cd /root/claude-tmux-manager
 bash install.sh
 ```
