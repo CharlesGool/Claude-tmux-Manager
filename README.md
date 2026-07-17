@@ -18,9 +18,11 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
   工作区信任对话框（默认高亮在"1. Yes, I trust this folder"，直接回车）；以及
   `--resume` 一个较老/较大的对话时可能出现的"Resume from summary / Resume full
   session as-is"选择框（默认高亮在推荐的"1. Resume from summary"，同样直接
-  回车，避免无人值守时卡死在这个对话框上）。并轮询捕获 pane 内容直到看到
-  `remote-control is active` 横幅才认为启动成功。每次运行都新建一个独立会话
-  （`claude-<时间戳>`），互不影响。
+  回车，避免无人值守时卡死在这个对话框上）。轮询捕获 pane 内容直到看到
+  `auto mode on` 这个底部状态提示（说明已经到了正常空闲输入界面，不再卡在任何
+  弹窗上）才认为启动完成，随后调用 `ctm_ensure_remote_control` 用 claude 自带的
+  `/rc` 命令确认/纠正远程控制状态（见下方"远程控制"判定方法）。每次运行都新建
+  一个独立会话（`claude-<时间戳>`），互不影响。
 
 - **保活 (`claude-tmux-keep_alive.sh`)**：只管"发现问题就地修复"。每分钟由
   systemd timer 触发一次：遍历所有 `claude-*` 会话，用
@@ -28,9 +30,11 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
   （活着是 `claude`，死了会掉回 `bash`/`sh`）；死了就在同一个 tmux 会话里原地
   重新拉起，会话的名字/身份不变。如果连一个 `claude-*` 会话都没有了，直接调用
   创建脚本补一个，保证任何时候都至少有一个可远程使用的会话。除了"进程死了"，
-  也会处理"进程活着但 remote-control 一直没真正连上"（`claude_tmux_manager.py
-  --keepalive-check`，见下方"已知限制"）——空闲超过 90 秒还没确认就原地重启
-  重试，正在工作中的会话不会被打断。
+  也会处理"进程活着但 remote-control 还没确认打开"：只要 `state/sessions.json`
+  里这个会话还没被标记为已确认、且确实处于正常的空闲聊天输入框（不是在忙，
+  也不是卡在其它弹窗上），就会用 `/rc` 命令去检查并纠正（见下方"远程控制"
+  判定方法）；一旦确认打开过一次，之后每一轮就不会再对这个会话发 `/rc` 了，
+  避免健康的会话每分钟都被硬塞一条 `/rc` 命令、白白吃 token。
 
 - **管理中心 (`claude-tmux-manager.sh` + `claude_tmux_manager.py`)**：只管
   "展示状态、执行动作"，本身不做任何后台巡检。所有 JSON 解析（`~/.claude/`
@@ -44,7 +48,7 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
 |---|---|
 | Tmux 已连接 / 挂起中 | `tmux list-clients -t <session>` 有输出 = 已连接，无输出 = 挂起中 |
 | Claude Code 正在工作 / 未在工作 | 捕获 pane 最后几行，出现 `esc to interrupt` = 正在工作 |
-| 远程控制 启用中 / 未启用 | 两步判定，缺一不可：① 会话内 claude 子进程的启动命令行里是否包含 `--remote-control`（读 `/proc/<pid>/cmdline`）——这一步只能说明"启动时打算开"，② 是否真的观察到 claude 自己打印的 `/remote-control is active · Continue here...` 横幅——启动时 30 秒轮询内看到就记为已确认（写入 `state/sessions.json` 的 `remote_control_confirmed`），没看到就现场再扫一次 pane 全部回滚缓冲区（`tmux capture-pane -S -2000`）确认。只有两步都成立才算"启用中"；否则如实显示"未启用"，不会因为命令行里有这个参数就想当然。（背景：实测发现即使正常传了 `--remote-control` 且进程跑得好好的，这个横幅也有可能压根不出现——即远程控制静默失败——单看命令行参数会把这种情况误报成"已启用"。） |
+| 远程控制 启用中 / 未启用 | 不看命令行参数、不猜屏幕文字，而是直接问 claude 本身：向 pane 发送内置的 `/rc` 命令（`ctm_ensure_remote_control`，`common.sh`），然后在最多 10 秒内轮询三种可能结果：① 弹出"Remote Control"状态面板（Disconnect this session / Show QR code / Continue）——本来就是开着的，发一个 Escape 关掉面板即可（不会断开连接）；② 出现明确的失败提示（`Remote Control failed` / `...credentials fetch failed` / `...Session creation failed`，实测证实确实会发生，即使命令行正常带了 `--remote-control` 且进程运行完全正常）——如实记为未启用，交给下一轮保活重试；③ 两者都没出现——按"本来关着、/rc 已经静默打开"处理。只有前两种是确定结果，第三种是尽力而为的兜底假设。结果写入 `state/sessions.json` 的 `remote_control_on`，管理中心界面只读这个字段，不会每次刷新界面都现场探测。发送 `/rc` 前必须先用 `ctm_at_idle_prompt` 确认 pane 正处于正常的空闲聊天输入框（而不仅仅是"没有在 `esc to interrupt`"）——光看"没在工作"不够，会话也可能正卡在另一个完全不相关的确认框上（比如 `--resume` 一个很旧的对话时弹出的"Resume from summary"框），那种情况下盲目把 `/rc` 当按键发过去，等于是往一个自己看不懂的对话框里乱敲字符，行为不可预期。 |
 | 对话是否已归档 | 该对话 ID（`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` 的文件名）当前是否有存活的 tmux 会话与之对应（记录在 `state/sessions.json`） |
 
 三个脚本之间通过 `state/sessions.json` 传递"tmux 会话 <-> 对话 ID"的映射，且这个
@@ -107,9 +111,9 @@ bash install.sh
 5. 注册并启动 `claude-tmux-create.service`（开机启动一次）。
 6. 注册并启动 `claude-tmux-keepalive.timer`（每分钟跑一次保活）；如果这台机器
    没有 systemd，会自动退化为写一条 root crontab。
-7. 自检：确认 tmux 会话已建好、里面的 claude 进程活着、远程控制横幅出现、
-   保活巡检日志正常、管理中心 UI 能正常拉起。任何一步失败都会在最后汇总里
-   标红，并给出对应的日志路径。
+7. 自检：确认 tmux 会话已建好、里面的 claude 进程活着、远程控制已通过 `/rc`
+   确认开启、保活巡检日志正常、管理中心 UI 能正常拉起。任何一步失败都会在
+   最后汇总里标红，并给出对应的日志路径。
 
 ## 日常使用
 
@@ -174,10 +178,15 @@ bash uninstall.sh --purge
 - 对话 ID 与 tmux 会话的映射是在(重新)启动那一刻记录的；如果在某个已被托管的
   会话内部手动执行 `/clear` 或 `/resume` 切换到另一个对话，管理中心不会实时
   感知这次切换（要到该 tmux 会话被保活脚本重启时才会重新探测）。
-- 保活脚本现在也会处理"claude 进程活着，但 remote-control 一直没能真正建立
-  连接"这种故障（实测证实会发生：命令行正常带 `--remote-control`、进程运行
-  也正常、没有任何弹窗卡住，但 claude 自己那句 `/remote-control is active`
-  横幅就是没打印出来，即连接静默失败）——如果一个空闲（没有在 `esc to
-  interrupt` 中）会话超过 90 秒还没等到这个确认，保活脚本会就地杀掉 claude
-  子进程并重新拉起（用已知的对话 ID 恢复，不会丢对话），再给一次连接机会；
-  正在工作中的会话即使还没确认也不会被打断，避免打断正在进行的任务。
+- 远程控制一旦被 `/rc` 确认打开过一次（`state/sessions.json` 里
+  `remote_control_on` 为 true），保活脚本此后就不会再对这个会话探测/发送
+  `/rc` 了。如果它后续因为网络等原因中途掉线，不会被自动发现和重新打开，
+  只能手动在会话里再输入一次 `/rc` 自己确认。这是刻意的取舍：换取"每分钟
+  巡检不会对着健康会话反复发 `/rc`、白白往对话记录里塞命令、吃 token"。
+- 实测中 `/rc` 本身不是 100% 可靠——同一台机器上同时开着好几个
+  `claude --remote-control` 会话时，偶尔会遇到 `Remote Control failed ·
+  Session creation failed` / `...credentials fetch failed` 这类明确的失败提示
+  （原因未知，可能与并发的远程连接数量有关，也可能是网络/服务端瞬时问题）。
+  `ctm_ensure_remote_control` 会如实把这种情况记为未启用而不是误报成功，失败
+  的会话会在之后的保活轮次里自动重试，直到成功为止；不代表这套机制能保证
+  每次都在几秒内连上。

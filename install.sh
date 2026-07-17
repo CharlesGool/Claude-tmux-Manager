@@ -207,10 +207,11 @@ if [ -n "$SESSION_NAME" ]; then
         fail "$SESSION_NAME 内未检测到 claude 进程 (pane_current_command=$PANE_CMD)"
     fi
 
-    if tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null | grep -qi "remote-control is active"; then
-        pass "$SESSION_NAME 远程控制已激活"
+    RC_STATE="$(python3 "$CTM_HOME/claude_tmux_manager.py" --get-remote-control "$SESSION_NAME" 2>/dev/null)"
+    if [ "$RC_STATE" = "1" ]; then
+        pass "$SESSION_NAME 远程控制已确认开启（/rc 探测）"
     else
-        echo "  [WARN] $SESSION_NAME 远程控制横幅暂未捕获到（可能仍在启动中，不计入失败）"
+        echo "  [WARN] $SESSION_NAME 远程控制尚未确认开启（可能仍在启动中，不计入失败）"
     fi
 fi
 

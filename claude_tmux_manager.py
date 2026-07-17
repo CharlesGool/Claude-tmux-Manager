@@ -117,16 +117,6 @@ def tmux_pane_command(name):
     return out.splitlines()[0].strip()
 
 
-def tmux_pane_pid(name):
-    code, out, _ = _run(["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"])
-    if code != 0 or not out.strip():
-        return None
-    try:
-        return int(out.splitlines()[0].strip())
-    except ValueError:
-        return None
-
-
 def tmux_pane_path(name):
     code, out, _ = _run(["tmux", "display-message", "-p", "-t", name, "#{pane_current_path}"])
     if code != 0:
@@ -146,21 +136,6 @@ def tmux_is_working(name):
     return "esc to interrupt" in tail
 
 
-def tmux_remote_control_banner_seen(name):
-    """Scan pane scrollback (not just the current screen) for the
-    "remote-control is active" banner claude prints once, early, when the
-    connection actually comes up. Used as a live fallback for sessions whose
-    launch didn't confirm it within the initial 30s window (e.g. still stuck
-    on a trust/resume dialog) - once a human or a later keep-alive pass
-    resolves the dialog, this lets the manager UI notice without having to
-    relaunch anything. tmux's default 2000-line history is comfortably more
-    than the small amount of output printed before/around this banner."""
-    code, out, _ = _run(["tmux", "capture-pane", "-t", name, "-p", "-S", "-2000"])
-    if code != 0:
-        return False
-    return "remote-control is active" in out.lower()
-
-
 def tmux_kill_session(name):
     code, _, _ = _run(["tmux", "kill-session", "-t", name])
     return code == 0
@@ -170,29 +145,6 @@ def tmux_attach(name):
     """Blocking foreground attach - hands the real terminal to tmux until the
     user detaches (Ctrl-b d) or the session ends, then returns control here."""
     subprocess.call(["tmux", "attach-session", "-t", name])
-
-
-def claude_child_pid(pane_pid):
-    if not pane_pid:
-        return None
-    code, out, _ = _run(["pgrep", "-P", str(pane_pid), "-x", "claude"])
-    if code != 0 or not out.strip():
-        return None
-    try:
-        return int(out.splitlines()[0].strip())
-    except ValueError:
-        return None
-
-
-def remote_control_enabled(claude_pid):
-    if not claude_pid:
-        return False
-    try:
-        with open(f"/proc/{claude_pid}/cmdline", "rb") as f:
-            cmdline = f.read().replace(b"\0", b" ").decode(errors="ignore")
-        return "--remote-control" in cmdline
-    except OSError:
-        return False
 
 
 # --------------------------------------------------------------------------
@@ -378,35 +330,17 @@ def list_all_conversations():
 # Aggregated live-session view
 # --------------------------------------------------------------------------
 
-def remote_control_status(name, c_pid, state):
-    """Whether remote-control is genuinely up for this session, not just
-    intended. remote_control_enabled(c_pid) only tells us --remote-control is
-    on the launch command line, which is true the instant the process starts
-    and stays true even if it's sitting on a trust/resume dialog that's never
-    been resolved - by itself it contradicts ctm_launch_claude_in_session's
-    own "banner not confirmed" warning. So: flag must be present, AND we must
-    have actual evidence the connection came up - either recorded at launch
-    time (--rc-confirmed), or (for launches that timed out, or sessions that
-    predate this recording) a live scan of pane scrollback. A live "yes" gets
-    persisted back into state so future checks don't need to keep re-scanning."""
-    if not remote_control_enabled(c_pid):
-        return False
-    meta = state.get(name, {})
-    if "remote_control_confirmed" not in meta:
-        # Legacy session recorded before this field existed - no evidence
-        # either way, so don't newly flag a previously-fine session as broken.
-        return True
-    if meta["remote_control_confirmed"]:
-        return True
-    if tmux_remote_control_banner_seen(name):
-        state.setdefault(name, {})["remote_control_confirmed"] = True
-        save_state(state)
-        return True
-    return False
-
-
 def collect_sessions():
-    """Returns list of dicts describing every live claude-* tmux session."""
+    """Returns list of dicts describing every live claude-* tmux session.
+
+    Remote-control status is never probed live here (that would mean sending
+    keystrokes into a pane on every UI render, which is slow and - for a
+    session that's actively mid-conversation - disruptive). It's purely a
+    read of state/sessions.json's "remote_control_on" flag, which is the only
+    thing that ever writes it: ctm_ensure_remote_control (common.sh), run at
+    launch and by the keep-alive patrol via the claude-native `/rc` command
+    (see README) - the actual source of truth, not a guess from a process's
+    argv or scraped terminal text."""
     state = prune_state(load_state())
     sessions = []
     for name in tmux_list_claude_sessions():
@@ -414,9 +348,7 @@ def collect_sessions():
         pane_cmd = tmux_pane_command(name)
         claude_alive = pane_cmd == "claude"
         working = tmux_is_working(name) if claude_alive else False
-        pane_pid = tmux_pane_pid(name)
-        c_pid = claude_child_pid(pane_pid) if claude_alive else None
-        rc_on = remote_control_status(name, c_pid, state) if claude_alive else False
+        rc_on = bool(state.get(name, {}).get("remote_control_on")) if claude_alive else False
 
         conv_id = state.get(name, {}).get("conversation_id")
         cwd = state.get(name, {}).get("cwd") or tmux_pane_path(name) or "/root"
@@ -768,50 +700,33 @@ def cmd_record_session(args):
             "created_at": float(args.since) if not args.conversation_id else time.time(),
             "last_updated": time.time(),
         }
-        if args.rc_confirmed is not None:
-            state[args.session]["remote_control_confirmed"] = args.rc_confirmed == "1"
         save_state(state)
-        print(f"recorded {args.session} -> {conv_id} (cwd={args.cwd}, rc_confirmed={args.rc_confirmed})")
+        print(f"recorded {args.session} -> {conv_id} (cwd={args.cwd})")
     else:
         print(f"WARNING: could not discover conversation id for {args.session} (cwd={args.cwd})")
 
 
+# remote_control_on in state/sessions.json is the single source of truth for
+# whether a session's remote-control is actually up - see README for the
+# detection method (claude's own `/rc` command, run by ctm_ensure_remote_control
+# in common.sh). These two subcommands are its only reader/writer outside of
+# collect_sessions()'s own read.
 
-# claude-tmux-keep_alive.sh's old health check only asked "is a claude
-# process still in this pane" - it never noticed the case (see
-# remote_control_status above) where claude is alive and well but
-# remote-control silently never connected, so a session stuck that way
-# would be logged "healthy" forever and never get a second chance. This
-# centralizes the recovery decision so the bash side just acts on a verdict:
-#   healthy   - remote-control confirmed, nothing to do
-#   wait      - not confirmed yet, but either still within its startup grace
-#               period or actively mid-task (esc to interrupt) - leave alone
-#               rather than risk killing in-progress agent work
-#   relaunch  - not confirmed, idle, and past the grace period - worth
-#               killing the claude process and relaunching (resuming the
-#               same, already-known conversation id) to retry the connection
-RC_GRACE_SECONDS = 90
-
-
-def cmd_keepalive_check(args):
+def cmd_set_remote_control(args):
     state = load_state()
-    pane_pid = tmux_pane_pid(args.session)
-    c_pid = claude_child_pid(pane_pid)
-    if remote_control_status(args.session, c_pid, state):
-        print("healthy")
-        return
-    if tmux_is_working(args.session):
-        print("wait")
-        return
-    meta = state.get(args.session, {})
-    created_at = meta.get("created_at")
-    if created_at is None:
-        print("wait")
-        return
-    if time.time() - float(created_at) > RC_GRACE_SECONDS:
-        print(f"relaunch {meta.get('conversation_id', '')}")
-    else:
-        print("wait")
+    state.setdefault(args.session, {})["remote_control_on"] = args.on == "1"
+    state[args.session]["last_updated"] = time.time()
+    save_state(state)
+    print(f"{args.session}: remote_control_on={args.on == '1'}")
+
+
+def cmd_get_remote_control(args):
+    # Used by claude-tmux-keep_alive.sh to decide whether a session still
+    # needs an active /rc probe this pass - once confirmed on, skip it rather
+    # than injecting /rc + Escape into a perfectly healthy conversation every
+    # single minute forever (that would needlessly bloat its transcript).
+    state = load_state()
+    print("1" if state.get(args.session, {}).get("remote_control_on") else "0")
 
 
 def main():
@@ -820,19 +735,24 @@ def main():
     parser.add_argument("--cwd", default="/root")
     parser.add_argument("--since", default="0")
     parser.add_argument("--conversation-id", metavar="CONV_ID", default=None)
-    parser.add_argument("--rc-confirmed", metavar="0|1", default=None)
-    parser.add_argument("--keepalive-check", metavar="SESSION_NAME")
+    parser.add_argument("--set-remote-control", metavar="SESSION_NAME")
+    parser.add_argument("--get-remote-control", metavar="SESSION_NAME")
+    parser.add_argument("--on", metavar="0|1", default=None)
     args = parser.parse_args()
 
     if args.record_session:
         cmd_record_session(argparse.Namespace(
             session=args.record_session, cwd=args.cwd, since=args.since,
-            conversation_id=args.conversation_id, rc_confirmed=args.rc_confirmed,
+            conversation_id=args.conversation_id,
         ))
         return
 
-    if args.keepalive_check:
-        cmd_keepalive_check(argparse.Namespace(session=args.keepalive_check))
+    if args.set_remote_control:
+        cmd_set_remote_control(argparse.Namespace(session=args.set_remote_control, on=args.on))
+        return
+
+    if args.get_remote_control:
+        cmd_get_remote_control(argparse.Namespace(session=args.get_remote_control))
         return
 
     screen_main_menu()
