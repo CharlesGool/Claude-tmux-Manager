@@ -99,8 +99,14 @@ ctm_launch_claude_in_session() {
 
     # Record the (already-known) conversation id regardless of whether the
     # banner was confirmed in time - we're not discovering it, so a slow
-    # startup doesn't need to block bookkeeping.
-    python3 "$CTM_PY" --record-session "$session" --cwd "$cwd" --conversation-id "$conv_id" >> "$CTM_LOG_FILE" 2>&1
+    # startup doesn't need to block bookkeeping. Also record whether we
+    # actually *saw* "remote-control is active" (--rc-confirmed): the launch
+    # command line always contains --remote-control, so checking argv alone
+    # (the old approach) claims "enabled" even for a session that's still
+    # stuck on a dialog and never got there - this flag lets the manager UI
+    # tell the two apart instead of contradicting this function's own
+    # "banner not confirmed" warning a few lines below.
+    python3 "$CTM_PY" --record-session "$session" --cwd "$cwd" --conversation-id "$conv_id" --rc-confirmed "$ready" >> "$CTM_LOG_FILE" 2>&1
 
     if [ "$ready" -ne 1 ]; then
         ctm_log "$session: WARNING remote-control banner not observed within 30s (may still be starting)"

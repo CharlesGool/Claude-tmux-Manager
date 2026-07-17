@@ -146,6 +146,21 @@ def tmux_is_working(name):
     return "esc to interrupt" in tail
 
 
+def tmux_remote_control_banner_seen(name):
+    """Scan pane scrollback (not just the current screen) for the
+    "remote-control is active" banner claude prints once, early, when the
+    connection actually comes up. Used as a live fallback for sessions whose
+    launch didn't confirm it within the initial 30s window (e.g. still stuck
+    on a trust/resume dialog) - once a human or a later keep-alive pass
+    resolves the dialog, this lets the manager UI notice without having to
+    relaunch anything. tmux's default 2000-line history is comfortably more
+    than the small amount of output printed before/around this banner."""
+    code, out, _ = _run(["tmux", "capture-pane", "-t", name, "-p", "-S", "-2000"])
+    if code != 0:
+        return False
+    return "remote-control is active" in out.lower()
+
+
 def tmux_kill_session(name):
     code, _, _ = _run(["tmux", "kill-session", "-t", name])
     return code == 0
@@ -363,6 +378,33 @@ def list_all_conversations():
 # Aggregated live-session view
 # --------------------------------------------------------------------------
 
+def remote_control_status(name, c_pid, state):
+    """Whether remote-control is genuinely up for this session, not just
+    intended. remote_control_enabled(c_pid) only tells us --remote-control is
+    on the launch command line, which is true the instant the process starts
+    and stays true even if it's sitting on a trust/resume dialog that's never
+    been resolved - by itself it contradicts ctm_launch_claude_in_session's
+    own "banner not confirmed" warning. So: flag must be present, AND we must
+    have actual evidence the connection came up - either recorded at launch
+    time (--rc-confirmed), or (for launches that timed out, or sessions that
+    predate this recording) a live scan of pane scrollback. A live "yes" gets
+    persisted back into state so future checks don't need to keep re-scanning."""
+    if not remote_control_enabled(c_pid):
+        return False
+    meta = state.get(name, {})
+    if "remote_control_confirmed" not in meta:
+        # Legacy session recorded before this field existed - no evidence
+        # either way, so don't newly flag a previously-fine session as broken.
+        return True
+    if meta["remote_control_confirmed"]:
+        return True
+    if tmux_remote_control_banner_seen(name):
+        state.setdefault(name, {})["remote_control_confirmed"] = True
+        save_state(state)
+        return True
+    return False
+
+
 def collect_sessions():
     """Returns list of dicts describing every live claude-* tmux session."""
     state = prune_state(load_state())
@@ -374,7 +416,7 @@ def collect_sessions():
         working = tmux_is_working(name) if claude_alive else False
         pane_pid = tmux_pane_pid(name)
         c_pid = claude_child_pid(pane_pid) if claude_alive else None
-        rc_on = remote_control_enabled(c_pid) if claude_alive else False
+        rc_on = remote_control_status(name, c_pid, state) if claude_alive else False
 
         conv_id = state.get(name, {}).get("conversation_id")
         cwd = state.get(name, {}).get("cwd") or tmux_pane_path(name) or "/root"
@@ -726,8 +768,10 @@ def cmd_record_session(args):
             "created_at": float(args.since) if not args.conversation_id else time.time(),
             "last_updated": time.time(),
         }
+        if args.rc_confirmed is not None:
+            state[args.session]["remote_control_confirmed"] = args.rc_confirmed == "1"
         save_state(state)
-        print(f"recorded {args.session} -> {conv_id} (cwd={args.cwd})")
+        print(f"recorded {args.session} -> {conv_id} (cwd={args.cwd}, rc_confirmed={args.rc_confirmed})")
     else:
         print(f"WARNING: could not discover conversation id for {args.session} (cwd={args.cwd})")
 
@@ -738,12 +782,13 @@ def main():
     parser.add_argument("--cwd", default="/root")
     parser.add_argument("--since", default="0")
     parser.add_argument("--conversation-id", metavar="CONV_ID", default=None)
+    parser.add_argument("--rc-confirmed", metavar="0|1", default=None)
     args = parser.parse_args()
 
     if args.record_session:
         cmd_record_session(argparse.Namespace(
             session=args.record_session, cwd=args.cwd, since=args.since,
-            conversation_id=args.conversation_id,
+            conversation_id=args.conversation_id, rc_confirmed=args.rc_confirmed,
         ))
         return
 

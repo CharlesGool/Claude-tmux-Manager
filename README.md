@@ -41,7 +41,7 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
 |---|---|
 | Tmux 已连接 / 挂起中 | `tmux list-clients -t <session>` 有输出 = 已连接，无输出 = 挂起中 |
 | Claude Code 正在工作 / 未在工作 | 捕获 pane 最后几行，出现 `esc to interrupt` = 正在工作 |
-| 远程控制 启用中 / 未启用 | 会话内 claude 子进程的启动命令行里是否包含 `--remote-control`（读 `/proc/<pid>/cmdline`） |
+| 远程控制 启用中 / 未启用 | 两步判定，缺一不可：① 会话内 claude 子进程的启动命令行里是否包含 `--remote-control`（读 `/proc/<pid>/cmdline`）——这一步只能说明"启动时打算开"，② 是否真的观察到 claude 自己打印的 `/remote-control is active · Continue here...` 横幅——启动时 30 秒轮询内看到就记为已确认（写入 `state/sessions.json` 的 `remote_control_confirmed`），没看到就现场再扫一次 pane 全部回滚缓冲区（`tmux capture-pane -S -2000`）确认。只有两步都成立才算"启用中"；否则如实显示"未启用"，不会因为命令行里有这个参数就想当然。（背景：实测发现即使正常传了 `--remote-control` 且进程跑得好好的，这个横幅也有可能压根不出现——即远程控制静默失败——单看命令行参数会把这种情况误报成"已启用"。） |
 | 对话是否已归档 | 该对话 ID（`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` 的文件名）当前是否有存活的 tmux 会话与之对应（记录在 `state/sessions.json`） |
 
 三个脚本之间通过 `state/sessions.json` 传递"tmux 会话 <-> 对话 ID"的映射，且这个
