@@ -239,7 +239,21 @@ def file_birth_time(path):
         return None
 
 
-def find_new_conversation_id(cwd, since_ts, grace=2):
+def find_new_conversation_id(cwd, since_ts, grace=2, require_unambiguous=False):
+    """Best-effort fallback for sessions with no recorded conversation id
+    (normal launches record one deterministically - see ctm_launch_claude_in_session
+    in common.sh - so this only fires for orphaned/legacy/manual sessions).
+
+    Picking "the newest file in this cwd's project dir" is only trustworthy
+    when it is the *only* plausible candidate: cwd is commonly shared by
+    several concurrently-active conversations (e.g. everything rooted at
+    /root), so with more than one candidate there is no way to tell which
+    file belongs to this particular tmux session. Guessing anyway previously
+    caused multiple unrelated sessions to all display the same (wrong)
+    conversation id/content. When require_unambiguous is set, an ambiguous
+    result returns None (shown as unknown) instead of a confident-looking
+    wrong answer.
+    """
     project_dir = encode_project_dir(cwd)
     if not project_dir.is_dir():
         return None
@@ -257,6 +271,8 @@ def find_new_conversation_id(cwd, since_ts, grace=2):
                 continue
             candidates.append((st.st_mtime, p))
     if not candidates:
+        return None
+    if require_unambiguous and len(candidates) > 1:
         return None
     candidates.sort(key=lambda t: t[0], reverse=True)
     return candidates[0][1].stem
@@ -363,7 +379,7 @@ def collect_sessions():
         conv_id = state.get(name, {}).get("conversation_id")
         cwd = state.get(name, {}).get("cwd") or tmux_pane_path(name) or "/root"
         if not conv_id:
-            conv_id = find_new_conversation_id(cwd, since_ts=0)
+            conv_id = find_new_conversation_id(cwd, since_ts=0, require_unambiguous=True)
 
         preview = ""
         if conv_id:
@@ -691,13 +707,23 @@ def screen_main_menu():
 # --------------------------------------------------------------------------
 
 def cmd_record_session(args):
-    conv_id = find_new_conversation_id(args.cwd, float(args.since))
+    # Preferred path: the caller (ctm_launch_claude_in_session) already knows
+    # the conversation id for certain - either it's a --resume of a known id,
+    # or it minted the id itself via --session-id before claude even started.
+    # Only fall back to guessing-by-file-timestamp for callers that don't
+    # supply one (e.g. manual/legacy invocations), since that heuristic is
+    # unreliable whenever another conversation is concurrently active in the
+    # same cwd.
+    if args.conversation_id:
+        conv_id = args.conversation_id
+    else:
+        conv_id = find_new_conversation_id(args.cwd, float(args.since))
     state = load_state()
     if conv_id:
         state[args.session] = {
             "conversation_id": conv_id,
             "cwd": args.cwd,
-            "created_at": float(args.since),
+            "created_at": float(args.since) if not args.conversation_id else time.time(),
             "last_updated": time.time(),
         }
         save_state(state)
@@ -711,10 +737,14 @@ def main():
     parser.add_argument("--record-session", metavar="SESSION_NAME")
     parser.add_argument("--cwd", default="/root")
     parser.add_argument("--since", default="0")
+    parser.add_argument("--conversation-id", metavar="CONV_ID", default=None)
     args = parser.parse_args()
 
     if args.record_session:
-        cmd_record_session(argparse.Namespace(session=args.record_session, cwd=args.cwd, since=args.since))
+        cmd_record_session(argparse.Namespace(
+            session=args.record_session, cwd=args.cwd, since=args.since,
+            conversation_id=args.conversation_id,
+        ))
         return
 
     screen_main_menu()

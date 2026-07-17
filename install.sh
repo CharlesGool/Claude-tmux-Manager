@@ -66,15 +66,35 @@ export PATH="/root/.local/bin:$PATH"
 if ! command -v claude >/dev/null 2>&1; then
     echo "  未检测到 claude CLI, 使用官方脚本安装 ..."
     curl -fsSL https://claude.ai/install.sh | bash
-    if ! grep -q '.local/bin' /root/.bashrc 2>/dev/null; then
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
-    fi
     export PATH="/root/.local/bin:$PATH"
 fi
 if command -v claude >/dev/null 2>&1; then
-    pass "claude CLI 可用: $(command -v claude) ($(claude --version 2>/dev/null))"
+    CLAUDE_BIN="$(command -v claude)"
+    pass "claude CLI 可用: $CLAUDE_BIN ($(claude --version 2>/dev/null))"
 else
     fail "claude CLI 安装失败，请手动执行: curl -fsSL https://claude.ai/install.sh | bash"
+    exit 1
+fi
+
+# The official installer only puts claude on PATH via ~/.local/bin, and only
+# takes effect for *new* shells that (re-)source ~/.bashrc. Anyone already
+# sitting in the terminal that ran this script - or any non-interactive
+# caller (cron, systemd) - will still get "claude: command not found" even
+# though the check above just succeeded in-process. Symlink it into
+# /usr/local/bin, which is on PATH by default for every shell and service on
+# this host (see /etc/environment), so `claude` works immediately everywhere
+# without needing a new login shell.
+if [ ! -e /usr/local/bin/claude ] || [ "$(readlink -f /usr/local/bin/claude 2>/dev/null)" != "$(readlink -f "$CLAUDE_BIN")" ]; then
+    ln -sf "$CLAUDE_BIN" /usr/local/bin/claude
+fi
+if [ "$(readlink -f /usr/local/bin/claude 2>/dev/null)" = "$(readlink -f "$CLAUDE_BIN")" ]; then
+    pass "claude 已链接到 /usr/local/bin/claude (任意新终端/cron/systemd 均可直接使用，无需重新登录 shell)"
+else
+    fail "为 claude 创建 /usr/local/bin 软链接失败"
+fi
+
+if ! grep -q '.local/bin' /root/.bashrc 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> /root/.bashrc
 fi
 
 if [ -f /root/.claude/.credentials.json ] || python3 -c "
@@ -87,7 +107,13 @@ except Exception:
 " 2>/dev/null; then
     pass "Claude Code 已登录"
 else
-    fail "Claude Code 尚未登录 - 请先手动运行一次 'claude' 完成登录，再重新执行 install.sh"
+    fail "Claude Code 尚未登录"
+    echo >&2
+    echo "  Claude Code 尚未登录。后续步骤（写入记忆、拉起 tmux 会话、注册保活服务）都需要一个" >&2
+    echo "  已登录的 claude 才能正常工作，在未登录状态下继续只会产生一堆卡在登录/信任对话框上的" >&2
+    echo "  僵尸 tmux 会话。请先手动运行一次: claude   完成登录，再重新执行:" >&2
+    echo "    bash $CTM_HOME/install.sh" >&2
+    exit 1
 fi
 
 # --------------------------------------------------------------------------

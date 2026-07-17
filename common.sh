@@ -34,17 +34,43 @@ ctm_next_session_name() {
 }
 
 # Launch `claude --permission-mode auto --remote-control [extra args]` inside an
-# existing tmux session/pane, then resolve the "trust this folder" dialog automatically
-# by polling the pane content and pressing Enter (accepts the default-highlighted
-# "Yes, I trust this folder" option). Waits up to ~30s for the remote-control banner
-# to confirm the session came up healthy.
+# existing tmux session/pane, then resolve known one-time dialogs automatically
+# by polling the pane content and pressing Enter:
+#   - "trust this folder"          -> accepts the default-highlighted
+#                                      "Yes, I trust this folder" option.
+#   - "resume from summary" (only shown for old/large --resume sessions) ->
+#                                      accepts the default-highlighted
+#                                      "Resume from summary (recommended)"
+#                                      option, so an unattended relaunch never
+#                                      just sits there forever waiting for a
+#                                      keypress that will never come.
+# Waits up to ~30s for the remote-control banner to confirm the session came
+# up healthy.
+#
+# Which conversation (jsonl) this launch ends up using is never *guessed*
+# after the fact: for a --resume, it's the given id; for a brand-new
+# conversation, we mint a uuid ourselves and force claude to use it via
+# --session-id. Both are known with certainty before claude even starts, so
+# claude_tmux_manager.py never has to fall back to matching files by
+# birth/mtime in a shared project directory (which misidentifies the
+# conversation whenever another session is concurrently active in the same
+# cwd - see README/CLAUDE.md for the cwd-sharing note).
 ctm_launch_claude_in_session() {
     local session="$1"
     local cwd="$2"
-    shift 2
+    local resume_id="$3"
+    shift 3
     local extra_args="$*"
     local start_ts
     start_ts=$(date +%s)
+
+    local conv_id
+    if [ -n "$resume_id" ]; then
+        conv_id="$resume_id"
+    else
+        conv_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+        extra_args="$extra_args --session-id $conv_id"
+    fi
 
     tmux send-keys -t "$session" "cd '$cwd' && claude --permission-mode auto --remote-control $extra_args" Enter
 
@@ -59,19 +85,29 @@ ctm_launch_claude_in_session() {
             ctm_log "$session: resolved workspace-trust dialog"
             continue
         fi
+        if echo "$pane" | grep -qi "resume from summary\|resuming the full session will consume"; then
+            # Default cursor is on "1. Resume from summary (recommended)" - Enter confirms it.
+            tmux send-keys -t "$session" Enter
+            ctm_log "$session: resolved resume-from-summary dialog"
+            continue
+        fi
         if echo "$pane" | grep -qi "remote-control is active"; then
             ready=1
             break
         fi
     done
 
+    # Record the (already-known) conversation id regardless of whether the
+    # banner was confirmed in time - we're not discovering it, so a slow
+    # startup doesn't need to block bookkeeping.
+    python3 "$CTM_PY" --record-session "$session" --cwd "$cwd" --conversation-id "$conv_id" >> "$CTM_LOG_FILE" 2>&1
+
     if [ "$ready" -ne 1 ]; then
         ctm_log "$session: WARNING remote-control banner not observed within 30s (may still be starting)"
         return 1
     fi
 
-    ctm_log "$session: claude started, remote-control active (start_ts=$start_ts)"
-    python3 "$CTM_PY" --record-session "$session" --cwd "$cwd" --since "$start_ts" >> "$CTM_LOG_FILE" 2>&1
+    ctm_log "$session: claude started, remote-control active (start_ts=$start_ts, conversation_id=$conv_id)"
     return 0
 }
 

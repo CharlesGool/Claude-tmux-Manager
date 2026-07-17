@@ -14,10 +14,13 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
 统一的管理入口：
 
 - **创建 (`claude-tmux-create.sh`)**：只管"从零生成一个新的、干净的
-  remote-control 会话"，用 `tmux send-keys` 模拟按键自动确认工作区信任对话框
-  （实测：对话框默认高亮在"1. Yes, I trust this folder"，直接发送回车即可），
-  并轮询捕获 pane 内容直到看到 `remote-control is active` 横幅才认为启动成功。
-  每次运行都新建一个独立会话（`claude-<时间戳>`），互不影响。
+  remote-control 会话"，用 `tmux send-keys` 模拟按键自动确认两类一次性对话框：
+  工作区信任对话框（默认高亮在"1. Yes, I trust this folder"，直接回车）；以及
+  `--resume` 一个较老/较大的对话时可能出现的"Resume from summary / Resume full
+  session as-is"选择框（默认高亮在推荐的"1. Resume from summary"，同样直接
+  回车，避免无人值守时卡死在这个对话框上）。并轮询捕获 pane 内容直到看到
+  `remote-control is active` 横幅才认为启动成功。每次运行都新建一个独立会话
+  （`claude-<时间戳>`），互不影响。
 
 - **保活 (`claude-tmux-keep_alive.sh`)**：只管"发现问题就地修复"。每分钟由
   systemd timer 触发一次：遍历所有 `claude-*` 会话，用
@@ -41,11 +44,19 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
 | 远程控制 启用中 / 未启用 | 会话内 claude 子进程的启动命令行里是否包含 `--remote-control`（读 `/proc/<pid>/cmdline`） |
 | 对话是否已归档 | 该对话 ID（`~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` 的文件名）当前是否有存活的 tmux 会话与之对应（记录在 `state/sessions.json`） |
 
-三个脚本之间通过 `state/sessions.json` 传递"tmux 会话 <-> 对话 ID"的映射：
-创建/保活脚本每次(重新)启动一个 claude 进程后，都会调用
-`claude_tmux_manager.py --record-session ...`，在该会话对应的项目目录下找到
-刚生成的最新 `.jsonl` 文件并记下映射关系；管理中心读这个映射来判断"这个对话
-现在有没有对应的 tmux 会话"。
+三个脚本之间通过 `state/sessions.json` 传递"tmux 会话 <-> 对话 ID"的映射，且这个
+对话 ID 从不靠事后猜文件时间戳得来——`ctm_launch_claude_in_session`（`common.sh`）
+在真正拉起 claude 之前就已经确定了它：`--resume <id>` 时就是给定的 `<id>`；全新
+对话时则自己生成一个 uuid，通过 `claude --session-id <uuid>` 强制 claude 使用这个
+ID。两种情况下启动完成后都直接把这个已知 ID 记进 `state/sessions.json`
+（`claude_tmux_manager.py --record-session ... --conversation-id <id>`），管理中心
+读这个映射来判断"这个对话现在有没有对应的 tmux 会话"。
+（早期版本靠"在对应项目目录下找最近创建的 `.jsonl` 文件"猜测 ID，但当同一个
+cwd 下同时有多个对话在跑时——例如所有会话都默认落在 `/root`——这个猜测经常
+会把好几个不相关的 tmux 会话全部关联到同一个、恰好最活跃的对话上，界面上
+显示出错误的对话 ID 和内容。现仅在会话完全没有记录、且该 cwd 下确实只有唯一
+一个候选 `.jsonl` 文件时才会退回这种猜测，猜不准时如实显示为"-"，不会显示
+一个看似确定但其实错误的 ID。）
 
 ## 目录结构
 
@@ -82,8 +93,12 @@ bash install.sh
 1. 检查是否为 root。
 2. 缺什么装什么：`tmux`、`python3`（apt）。
 3. 检查 `claude` 命令是否存在，不存在则用官方脚本安装
-   （`curl -fsSL https://claude.ai/install.sh | bash`）并写好 `PATH`；检查是否
-   已登录，未登录会提示你先手动运行一次 `claude` 完成登录再重新执行。
+   （`curl -fsSL https://claude.ai/install.sh | bash`）；额外把它软链到
+   `/usr/local/bin/claude`（默认就在任何 shell/cron/systemd 的 PATH 上），
+   这样当前终端立刻就能用 `claude`，不需要重开一个 shell 或手动
+   `source ~/.bashrc`。然后检查是否已登录——**未登录会直接终止安装**并提示你
+   先手动运行一次 `claude` 完成登录再重新执行，不会继续往下跑（未登录状态下
+   继续只会造出一堆卡在登录/信任对话框上的僵尸 tmux 会话）。
 4. 把这套系统的使用说明写进 Claude Code 的记忆文件 `/root/.claude/CLAUDE.md`
    （用 `<!-- Claude-Tmux Manager's Start/End -->` 包裹，方便日后精准移除）。
 5. 注册并启动 `claude-tmux-create.service`（开机启动一次）。

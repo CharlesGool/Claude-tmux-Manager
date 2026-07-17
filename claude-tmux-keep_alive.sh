@@ -51,7 +51,7 @@ for session in "${SESSIONS[@]}"; do
     # (and thus anything pointing at it, e.g. the manager UI) survives the restart.
     ctm_log "$session: remote-control is down (pane shows '$cmd', not claude) - reactivating"
     cwd="$(tmux display-message -p -t "$session" '#{pane_current_path}' 2>/dev/null || echo "$CTM_WORK_DIR")"
-    ctm_launch_claude_in_session "$session" "$cwd"
+    ctm_launch_claude_in_session "$session" "$cwd" ""
 done
 
 ctm_log "keep-alive pass finished"

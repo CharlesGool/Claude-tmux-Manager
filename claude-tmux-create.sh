@@ -59,7 +59,7 @@ if [ -n "$RESUME_ID" ]; then
     EXTRA_ARGS="--resume $RESUME_ID"
 fi
 
-ctm_launch_claude_in_session "$SESSION_NAME" "$TARGET_CWD" "$EXTRA_ARGS"
+ctm_launch_claude_in_session "$SESSION_NAME" "$TARGET_CWD" "$RESUME_ID" "$EXTRA_ARGS"
 STATUS=$?
 
 if [ "$STATUS" -eq 0 ]; then
