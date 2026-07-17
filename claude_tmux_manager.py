@@ -776,6 +776,44 @@ def cmd_record_session(args):
         print(f"WARNING: could not discover conversation id for {args.session} (cwd={args.cwd})")
 
 
+
+# claude-tmux-keep_alive.sh's old health check only asked "is a claude
+# process still in this pane" - it never noticed the case (see
+# remote_control_status above) where claude is alive and well but
+# remote-control silently never connected, so a session stuck that way
+# would be logged "healthy" forever and never get a second chance. This
+# centralizes the recovery decision so the bash side just acts on a verdict:
+#   healthy   - remote-control confirmed, nothing to do
+#   wait      - not confirmed yet, but either still within its startup grace
+#               period or actively mid-task (esc to interrupt) - leave alone
+#               rather than risk killing in-progress agent work
+#   relaunch  - not confirmed, idle, and past the grace period - worth
+#               killing the claude process and relaunching (resuming the
+#               same, already-known conversation id) to retry the connection
+RC_GRACE_SECONDS = 90
+
+
+def cmd_keepalive_check(args):
+    state = load_state()
+    pane_pid = tmux_pane_pid(args.session)
+    c_pid = claude_child_pid(pane_pid)
+    if remote_control_status(args.session, c_pid, state):
+        print("healthy")
+        return
+    if tmux_is_working(args.session):
+        print("wait")
+        return
+    meta = state.get(args.session, {})
+    created_at = meta.get("created_at")
+    if created_at is None:
+        print("wait")
+        return
+    if time.time() - float(created_at) > RC_GRACE_SECONDS:
+        print(f"relaunch {meta.get('conversation_id', '')}")
+    else:
+        print("wait")
+
+
 def main():
     parser = argparse.ArgumentParser(description="claude-tmux-manager")
     parser.add_argument("--record-session", metavar="SESSION_NAME")
@@ -783,6 +821,7 @@ def main():
     parser.add_argument("--since", default="0")
     parser.add_argument("--conversation-id", metavar="CONV_ID", default=None)
     parser.add_argument("--rc-confirmed", metavar="0|1", default=None)
+    parser.add_argument("--keepalive-check", metavar="SESSION_NAME")
     args = parser.parse_args()
 
     if args.record_session:
@@ -790,6 +829,10 @@ def main():
             session=args.record_session, cwd=args.cwd, since=args.since,
             conversation_id=args.conversation_id, rc_confirmed=args.rc_confirmed,
         ))
+        return
+
+    if args.keepalive_check:
+        cmd_keepalive_check(argparse.Namespace(session=args.keepalive_check))
         return
 
     screen_main_menu()

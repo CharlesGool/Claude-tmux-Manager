@@ -27,7 +27,10 @@ Claude Code 的 `--remote-control` 模式需要一个持续运行的前台进程
   `tmux list-panes -F '#{pane_current_command}'` 判断 claude 进程是否还活着
   （活着是 `claude`，死了会掉回 `bash`/`sh`）；死了就在同一个 tmux 会话里原地
   重新拉起，会话的名字/身份不变。如果连一个 `claude-*` 会话都没有了，直接调用
-  创建脚本补一个，保证任何时候都至少有一个可远程使用的会话。
+  创建脚本补一个，保证任何时候都至少有一个可远程使用的会话。除了"进程死了"，
+  也会处理"进程活着但 remote-control 一直没真正连上"（`claude_tmux_manager.py
+  --keepalive-check`，见下方"已知限制"）——空闲超过 90 秒还没确认就原地重启
+  重试，正在工作中的会话不会被打断。
 
 - **管理中心 (`claude-tmux-manager.sh` + `claude_tmux_manager.py`)**：只管
   "展示状态、执行动作"，本身不做任何后台巡检。所有 JSON 解析（`~/.claude/`
@@ -171,6 +174,10 @@ bash uninstall.sh --purge
 - 对话 ID 与 tmux 会话的映射是在(重新)启动那一刻记录的；如果在某个已被托管的
   会话内部手动执行 `/clear` 或 `/resume` 切换到另一个对话，管理中心不会实时
   感知这次切换（要到该 tmux 会话被保活脚本重启时才会重新探测）。
-- 保活脚本只处理"claude 进程已经退出"这一种故障；如果 claude 进程还活着但不
-  知何故失去了 `--remote-control`（理论上不会通过正常操作发生），脚本只会记
-  录警告，不会强行杀掉一个可能正在工作的前台进程。
+- 保活脚本现在也会处理"claude 进程活着，但 remote-control 一直没能真正建立
+  连接"这种故障（实测证实会发生：命令行正常带 `--remote-control`、进程运行
+  也正常、没有任何弹窗卡住，但 claude 自己那句 `/remote-control is active`
+  横幅就是没打印出来，即连接静默失败）——如果一个空闲（没有在 `esc to
+  interrupt` 中）会话超过 90 秒还没等到这个确认，保活脚本会就地杀掉 claude
+  子进程并重新拉起（用已知的对话 ID 恢复，不会丢对话），再给一次连接机会；
+  正在工作中的会话即使还没确认也不会被打断，避免打断正在进行的任务。

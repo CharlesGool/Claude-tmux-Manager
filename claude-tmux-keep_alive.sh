@@ -8,6 +8,13 @@
 #   - if the claude process inside it has died (pane fell back to a plain shell),
 #     it is relaunched in-place so the same tmux session keeps its remote-control
 #     link alive.
+#   - if claude is alive but remote-control never actually confirmed (it
+#     silently failed to connect - this does happen even with no dialog
+#     involved, not just a theoretical case) and the session has been idle
+#     past its startup grace period, claude is killed and relaunched in-place
+#     (resuming the same conversation id) to give the connection another
+#     shot. A session that's actively mid-task (esc to interrupt) is left
+#     alone even if unconfirmed, so in-progress agent work is never killed.
 # If there are no "claude-*" sessions at all, a brand new one is created so this
 # host always has at least one Claude Code remote-control session available.
 set -uo pipefail
@@ -31,18 +38,24 @@ for session in "${SESSIONS[@]}"; do
     cmd="$(ctm_pane_command "$session")"
 
     if [ "$cmd" = "claude" ]; then
-        pane_pid="$(tmux list-panes -t "$session" -F "#{pane_pid}" 2>/dev/null | head -1)"
-        claude_pid="$(pgrep -P "$pane_pid" -x claude 2>/dev/null | head -1)"
-        remote_control_on=0
-        if [ -n "$claude_pid" ] && tr '\0' ' ' < "/proc/$claude_pid/cmdline" 2>/dev/null | grep -q -- "--remote-control"; then
-            remote_control_on=1
-        fi
-
-        if [ "$remote_control_on" -eq 1 ]; then
-            ctm_log "$session: healthy (claude running, remote-control on)"
-        else
-            ctm_log "$session: WARNING claude is running but --remote-control flag not detected on its process; leaving it alone to avoid interrupting an active session"
-        fi
+        verdict="$(python3 "$CTM_PY" --keepalive-check "$session" 2>>"$CTM_LOG_FILE")"
+        case "$verdict" in
+            healthy)
+                ctm_log "$session: healthy (claude running, remote-control confirmed)"
+                ;;
+            relaunch\ *)
+                resume_id="${verdict#relaunch }"
+                ctm_log "$session: claude running but remote-control never confirmed and session is idle past its grace period - killing claude and relaunching (resume=${resume_id:-none}) to retry the connection"
+                claude_pid="$(pgrep -P "$(tmux list-panes -t "$session" -F "#{pane_pid}" 2>/dev/null | head -1)" -x claude 2>/dev/null | head -1)"
+                [ -n "$claude_pid" ] && kill "$claude_pid" 2>/dev/null
+                sleep 1
+                cwd="$(tmux display-message -p -t "$session" '#{pane_current_path}' 2>/dev/null || echo "$CTM_WORK_DIR")"
+                ctm_launch_claude_in_session "$session" "$cwd" "$resume_id"
+                ;;
+            *)
+                ctm_log "$session: claude running, remote-control not yet confirmed (still within grace period or actively working) - leaving it alone"
+                ;;
+        esac
         continue
     fi
 
